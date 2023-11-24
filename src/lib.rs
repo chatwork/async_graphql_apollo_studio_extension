@@ -78,7 +78,7 @@ const REPORTING_URL: &str = "https://usage-reporting.api.apollographql.com/api/i
 const TARGET_LOG: &str = "apollo-studio-extension";
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 const RUNTIME_VERSION: &str = "Rust - No runtime version provided yet";
-const MAX_TRACES: usize = 100;
+const MAX_TRACES: usize = 1000;
 
 /// An ENUM describing the various HTTP Methods existing.
 #[derive(Debug, Clone)]
