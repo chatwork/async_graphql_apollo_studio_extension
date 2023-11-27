@@ -33,6 +33,7 @@ mod runtime;
 
 #[macro_use]
 extern crate tracing;
+
 use packages::uname::Uname;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -182,7 +183,7 @@ impl ApolloTracing {
 
         let client = reqwest::Client::new();
         #[allow(unused_mut)]
-        let (sender, mut receiver) = channel::<(String, Trace)>(batch_target * 3);
+            let (sender, mut receiver) = channel::<(String, Trace)>(batch_target * 3);
 
         let header_tokio = Arc::clone(&header);
 
@@ -213,7 +214,7 @@ impl ApolloTracing {
 
                 count += 1;
 
-                if count > batch_target || count > MAX_TRACES  {
+                if count > batch_target || count > MAX_TRACES {
                     use tracing::{field, field::debug, span, Level};
 
                     let span_batch = span!(
@@ -456,9 +457,10 @@ impl Extension for ApolloTracingExtension {
         info: ResolveInfo<'_>,
         next: NextResolve<'_>,
     ) -> ServerResult<Option<Value>> {
+        next.run(ctx, info).await
         // We do create a node when it's invoked which we insert at the right place inside the
         // struct.
-
+        /*
         let path = info.path_node.to_string_vec().join(".");
         let field_name = info.path_node.field_name().to_string();
         let parent_type = info.parent_type.to_string();
@@ -554,5 +556,6 @@ impl Extension for ApolloTracingExtension {
         };
 
         res
+         */
     }
 }
