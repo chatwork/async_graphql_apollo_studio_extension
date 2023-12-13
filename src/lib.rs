@@ -184,7 +184,7 @@ impl ApolloTracing {
 
         let client = reqwest::Client::new();
         #[allow(unused_mut)]
-            let (sender, mut receiver) = channel::<(String, Trace)>(batch_target * 3);
+        let (sender, mut receiver) = channel::<(String, Trace)>(batch_target * 3);
 
         let header_tokio = Arc::clone(&header);
 
@@ -372,11 +372,11 @@ impl Extension for ApolloTracingExtension {
         operation_name: Option<&str>,
         next: NextExecute<'_>,
     ) -> Response {
-        let mut start_time = self.start_time.write().await;
-        *start_time = Utc::now();
+        *self.start_time.write().await = Utc::now();
         let resp = next.run(ctx, operation_name).await;
         // Here every responses are executed
         // The next execute should aggregates a node a not a trace
+        let start_time = self.start_time.read().await;
         let mut end_time = self.end_time.write().await;
         *end_time = Utc::now();
 
@@ -591,7 +591,12 @@ impl Extension for ApolloTracingExtension {
                 }
                 let read_guard = current_node.read().await;
                 let mut children_w = read_guard.children().write().await;
-                children_w.get_mut(&field_name).expect("child node not found, field_name: {field_name}").write().await.trace = node.clone();
+                children_w
+                    .get_mut(&field_name)
+                    .expect("child node not found, field_name: {field_name}")
+                    .write()
+                    .await
+                    .trace = node.clone();
             }
         };
 
