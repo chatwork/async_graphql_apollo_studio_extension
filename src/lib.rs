@@ -514,7 +514,7 @@ impl Extension for ApolloTracingExtension {
                     .await
                     .get(segment)
                     .cloned()
-                    .expect("child node not found, segment: {segment}");
+                    .expect(format!("child node not found, segment: {segment}"));
                 current_node = next_node;
             }
 
@@ -586,14 +586,14 @@ impl Extension for ApolloTracingExtension {
                         .await
                         .get(segment)
                         .cloned()
-                        .expect("child node not found, segment: {segment}");
+                        .expect(format!("child node not found, segment: {segment}"));
                     current_node = next_node;
                 }
                 let read_guard = current_node.read().await;
                 let mut children_w = read_guard.children().write().await;
                 children_w
                     .get_mut(&field_name)
-                    .expect("child node not found, field_name: {field_name}")
+                    .expect(format!("child node not found, field_name: {field_name}"))
                     .write()
                     .await
                     .trace = node.clone();
