@@ -43,6 +43,7 @@ use chrono::{DateTime, Utc};
 use protobuf::well_known_types::Timestamp;
 use protobuf::RepeatedField;
 use std::convert::TryFrom;
+use std::ops::Deref;
 
 use async_graphql::extensions::{
     Extension, ExtensionContext, ExtensionFactory, NextExecute, NextParseQuery, NextResolve,
@@ -56,6 +57,7 @@ use proto::{
 };
 use runtime::{channel, Runtime, RwLock, Sender};
 use std::convert::TryInto;
+use async_recursion::async_recursion;
 
 /// Apollo Tracing Extension to send traces to Apollo Studio
 /// The extension to include to your `async_graphql` instance to connect with Apollo Studio.
@@ -291,10 +293,35 @@ impl ExtensionFactory for ApolloTracing {
             start_time: RwLock::new(Utc::now()),
             end_time: RwLock::new(Utc::now()),
             sender: Arc::clone(&self.sender),
-            nodes: RwLock::new(HashMap::new()),
-            root_node: Arc::new(RwLock::new(Trace_Node::new())),
+            root_node: Arc::new(RwLock::new(TraceTreeNode {
+                trace: Arc::new(RwLock::new(Trace_Node::new())),
+                children: RwLock::new(HashMap::new()),
+            })),
             operation_name: RwLock::new("schema".to_string()),
         })
+    }
+}
+
+struct TraceTreeNode {
+    pub trace: Arc<RwLock<Trace_Node>>,
+    pub children: RwLock<HashMap<String, Arc<RwLock<TraceTreeNode>>>>,
+}
+
+impl TraceTreeNode {
+    fn children(&self) -> &RwLock<HashMap<String, Arc<RwLock<TraceTreeNode>>>> {
+        &self.children
+    }
+
+    #[async_recursion]
+    async fn to_trace_node(&self) -> Trace_Node {
+        let mut trace = self.trace.write().await;
+        let mut children = self.children.write().await;
+        let mut vec = vec![];
+        for (_name, node) in children.iter_mut() {
+            vec.push(node.write().await.to_trace_node().await);
+        }
+        trace.set_child(RepeatedField::from_vec(vec));
+        trace.deref().clone()
     }
 }
 
@@ -302,8 +329,7 @@ struct ApolloTracingExtension {
     start_time: RwLock<DateTime<Utc>>,
     end_time: RwLock<DateTime<Utc>>,
     sender: Arc<Sender<(String, Trace)>>,
-    nodes: RwLock<HashMap<String, Arc<RwLock<Trace_Node>>>>,
-    root_node: Arc<RwLock<Trace_Node>>,
+    root_node: Arc<RwLock<TraceTreeNode>>,
     operation_name: RwLock<String>,
 }
 
@@ -330,8 +356,7 @@ impl Extension for ApolloTracingExtension {
                 .operations
                 .iter()
                 .next()
-                .map(|x| x.0)
-                .flatten()
+                .and_then(|x| x.0)
                 .map(|x| x.as_str())
                 .unwrap_or("no_name");
             let query_type = format!("# {name}\n {query}", name = name, query = result);
@@ -427,8 +452,7 @@ impl Extension for ApolloTracingExtension {
             ..Default::default()
         });
 
-        let root_node = self.root_node.read().await;
-        trace.set_root(root_node.clone());
+        trace.set_root(self.root_node.write().await.to_trace_node().await.clone());
 
         let sender = self.sender.clone();
 
@@ -450,8 +474,6 @@ impl Extension for ApolloTracingExtension {
     ) -> ServerResult<Option<Value>> {
         // We do create a node when it's invoked which we insert at the right place inside the
         // struct.
-
-        let path = info.path_node.to_string_vec().join(".");
         let field_name = info.path_node.field_name().to_string();
         let parent_type = info.parent_type.to_string();
         let return_type = info.return_type.to_string();
@@ -476,13 +498,29 @@ impl Extension for ApolloTracingExtension {
                 None => Utc::now().timestamp_nanos().try_into().unwrap(),
             },
             parent_type: parent_type.to_string(),
-            original_field_name: field_name,
+            original_field_name: field_name.clone(),
             field_type: return_type,
             ..Default::default()
         };
         let node = Arc::new(RwLock::new(node));
-        self.nodes.write().await.insert(path, node.clone());
-        let parent_node = path_node.parent.map(|x| x.to_string_vec().join("."));
+        let parent_node_path = path_node.parent.map(|x| x.to_string_vec().join("."));
+        // root node does not have `parent`
+        if let Some(parent_path) = &parent_node_path {
+            let segments = parent_path.split('.').collect::<Vec<&str>>();
+            let mut current_node = self.root_node.clone();
+            for segment in segments {
+                let next_node = current_node.read().await.children().read().await.get(segment).cloned().unwrap();
+                current_node = next_node;
+            }
+
+            let read_guard = current_node.read().await;
+            let mut children_w = read_guard.children().write().await;
+            children_w.insert(field_name.clone(), Arc::new(RwLock::new(TraceTreeNode {
+                trace: node.clone(),
+                children: RwLock::new(HashMap::new()),
+            })));
+        }
+
         // Use the path to create a new node
         // https://github.com/apollographql/apollo-server/blob/291c17e255122d4733b23177500188d68fac55ce/packages/apollo-server-core/src/plugin/traceTreeBuilder.ts
         let res = match next.run(ctx, info).await {
@@ -524,24 +562,20 @@ impl Extension for ApolloTracingExtension {
             },
         );
 
-        match parent_node {
+        match parent_node_path {
             None => {
-                let mut root_node = self.root_node.write().await;
-                let child = &mut *root_node.mut_child();
-                let node = node.read().await;
-                // Can't copy or pass a ref to Protobuf
-                // So we clone
-                child.push(node.clone());
+                self.root_node.write().await.trace = node.clone();
             }
-            Some(parent) => {
-                let nodes = self.nodes.read().await;
-                let node_read = &*nodes.get(&parent).unwrap();
-                let mut parent = node_read.write().await;
-                let child = &mut *parent.mut_child();
-                let node = node.read().await;
-                // Can't copy or pass a ref to Protobuf
-                // So we clone
-                child.push(node.clone());
+            Some(parent_path) => {
+                let segments = parent_path.split('.').collect::<Vec<&str>>();
+                let mut current_node = self.root_node.clone();
+                for segment in segments {
+                    let next_node = current_node.read().await.children().read().await.get(segment).cloned().unwrap();
+                    current_node = next_node;
+                }
+                let read_guard = current_node.read().await;
+                let mut children_w = read_guard.children().write().await;
+                children_w.get_mut(&field_name).unwrap().write().await.trace = node.clone();
             }
         };
 
