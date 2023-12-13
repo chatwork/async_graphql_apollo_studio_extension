@@ -184,7 +184,7 @@ impl ApolloTracing {
 
         let client = reqwest::Client::new();
         #[allow(unused_mut)]
-        let (sender, mut receiver) = channel::<(String, Trace)>(batch_target * 3);
+            let (sender, mut receiver) = channel::<(String, Trace)>(batch_target * 3);
 
         let header_tokio = Arc::clone(&header);
 
@@ -514,7 +514,7 @@ impl Extension for ApolloTracingExtension {
                     .await
                     .get(segment)
                     .cloned()
-                    .unwrap();
+                    .expect("child node not found, segment: {segment}");
                 current_node = next_node;
             }
 
@@ -586,12 +586,12 @@ impl Extension for ApolloTracingExtension {
                         .await
                         .get(segment)
                         .cloned()
-                        .unwrap();
+                        .expect("child node not found, segment: {segment}");
                     current_node = next_node;
                 }
                 let read_guard = current_node.read().await;
                 let mut children_w = read_guard.children().write().await;
-                children_w.get_mut(&field_name).unwrap().write().await.trace = node.clone();
+                children_w.get_mut(&field_name).expect("child node not found, field_name: {field_name}").write().await.trace = node.clone();
             }
         };
 
