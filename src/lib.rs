@@ -51,13 +51,13 @@ use async_graphql::extensions::{
 };
 use async_graphql::parser::types::{ExecutableDocument, OperationType, Selection};
 use async_graphql::{Response, ServerResult, Value, Variables};
+use async_recursion::async_recursion;
 use proto::{
     Report, ReportHeader, Trace, Trace_Details, Trace_Error, Trace_HTTP, Trace_HTTP_Method,
     Trace_Location, Trace_Node, Trace_Node_oneof_id, TracesAndStats,
 };
 use runtime::{channel, Runtime, RwLock, Sender};
 use std::convert::TryInto;
-use async_recursion::async_recursion;
 
 /// Apollo Tracing Extension to send traces to Apollo Studio
 /// The extension to include to your `async_graphql` instance to connect with Apollo Studio.
@@ -184,7 +184,7 @@ impl ApolloTracing {
 
         let client = reqwest::Client::new();
         #[allow(unused_mut)]
-            let (sender, mut receiver) = channel::<(String, Trace)>(batch_target * 3);
+        let (sender, mut receiver) = channel::<(String, Trace)>(batch_target * 3);
 
         let header_tokio = Arc::clone(&header);
 
@@ -444,10 +444,7 @@ impl Extension for ApolloTracingExtension {
         });
 
         trace.set_start_time(Timestamp {
-            nanos: start_time
-                .timestamp_subsec_nanos()
-                .try_into()
-                .unwrap(),
+            nanos: start_time.timestamp_subsec_nanos().try_into().unwrap(),
             seconds: start_time.timestamp(),
             ..Default::default()
         });
@@ -509,16 +506,27 @@ impl Extension for ApolloTracingExtension {
             let segments = parent_path.split('.').collect::<Vec<&str>>();
             let mut current_node = self.root_node.clone();
             for segment in segments {
-                let next_node = current_node.read().await.children().read().await.get(segment).cloned().unwrap();
+                let next_node = current_node
+                    .read()
+                    .await
+                    .children()
+                    .read()
+                    .await
+                    .get(segment)
+                    .cloned()
+                    .unwrap();
                 current_node = next_node;
             }
 
             let read_guard = current_node.read().await;
             let mut children_w = read_guard.children().write().await;
-            children_w.insert(field_name.clone(), Arc::new(RwLock::new(TraceTreeNode {
-                trace: node.clone(),
-                children: RwLock::new(HashMap::new()),
-            })));
+            children_w.insert(
+                field_name.clone(),
+                Arc::new(RwLock::new(TraceTreeNode {
+                    trace: node.clone(),
+                    children: RwLock::new(HashMap::new()),
+                })),
+            );
         }
 
         // Use the path to create a new node
@@ -570,7 +578,15 @@ impl Extension for ApolloTracingExtension {
                 let segments = parent_path.split('.').collect::<Vec<&str>>();
                 let mut current_node = self.root_node.clone();
                 for segment in segments {
-                    let next_node = current_node.read().await.children().read().await.get(segment).cloned().unwrap();
+                    let next_node = current_node
+                        .read()
+                        .await
+                        .children()
+                        .read()
+                        .await
+                        .get(segment)
+                        .cloned()
+                        .unwrap();
                     current_node = next_node;
                 }
                 let read_guard = current_node.read().await;
