@@ -502,31 +502,42 @@ impl Extension for ApolloTracingExtension {
         let node = Arc::new(RwLock::new(node));
         let parent_node_path = path_node.parent.map(|x| x.to_string_vec().join("."));
         // root node does not have `parent`
-        if let Some(parent_path) = &parent_node_path {
-            let segments = parent_path.split('.').collect::<Vec<&str>>();
-            let mut current_node = self.root_node.clone();
-            for segment in segments {
-                let next_node = current_node
-                    .read()
-                    .await
-                    .children()
-                    .read()
-                    .await
-                    .get(segment)
-                    .cloned()
-                    .expect(format!("child node not found, segment: {segment}"));
-                current_node = next_node;
-            }
+        match &parent_node_path {
+            Some(parent_path) => {
+                let segments = parent_path.split('.').collect::<Vec<&str>>();
+                let mut current_node = self.root_node.clone();
+                for segment in segments {
+                    let next_node = current_node
+                        .read()
+                        .await
+                        .children()
+                        .read()
+                        .await
+                        .get(segment)
+                        .cloned()
+                        .expect(&format!("child node not found, segment: {segment}"));
+                    current_node = next_node;
+                }
 
-            let read_guard = current_node.read().await;
-            let mut children_w = read_guard.children().write().await;
-            children_w.insert(
-                field_name.clone(),
-                Arc::new(RwLock::new(TraceTreeNode {
-                    trace: node.clone(),
-                    children: RwLock::new(HashMap::new()),
-                })),
-            );
+                let read_guard = current_node.read().await;
+                let mut children_w = read_guard.children().write().await;
+                children_w.insert(
+                    field_name.clone(),
+                    Arc::new(RwLock::new(TraceTreeNode {
+                        trace: node.clone(),
+                        children: RwLock::new(HashMap::new()),
+                    })),
+                );
+            }
+            None => {
+                self.root_node.read().await.children().write().await.insert(
+                    field_name.clone(),
+                    Arc::new(RwLock::new(TraceTreeNode {
+                        trace: node.clone(),
+                        children: RwLock::new(HashMap::new()),
+                    })),
+                );
+            }
         }
 
         // Use the path to create a new node
@@ -572,7 +583,17 @@ impl Extension for ApolloTracingExtension {
 
         match parent_node_path {
             None => {
-                self.root_node.write().await.trace = node.clone();
+                self.root_node
+                    .read()
+                    .await
+                    .children()
+                    .write()
+                    .await
+                    .get_mut(&field_name)
+                    .expect(&format!("child node not found, field_name: {field_name}"))
+                    .write()
+                    .await
+                    .trace = node.clone();
             }
             Some(parent_path) => {
                 let segments = parent_path.split('.').collect::<Vec<&str>>();
@@ -586,14 +607,14 @@ impl Extension for ApolloTracingExtension {
                         .await
                         .get(segment)
                         .cloned()
-                        .expect(format!("child node not found, segment: {segment}"));
+                        .expect(&format!("child node not found, segment: {segment}"));
                     current_node = next_node;
                 }
                 let read_guard = current_node.read().await;
                 let mut children_w = read_guard.children().write().await;
                 children_w
                     .get_mut(&field_name)
-                    .expect(format!("child node not found, field_name: {field_name}"))
+                    .expect(&format!("child node not found, field_name: {field_name}"))
                     .write()
                     .await
                     .trace = node.clone();
