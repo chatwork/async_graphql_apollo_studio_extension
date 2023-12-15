@@ -584,46 +584,6 @@ impl Extension for ApolloTracingExtension {
             },
         );
 
-        match parent_node_path {
-            None => {
-                self.root_node
-                    .read()
-                    .await
-                    .children()
-                    .write()
-                    .await
-                    .get_mut(&field_name)
-                    .expect(&format!("child node not found, field_name: {field_name}"))
-                    .write()
-                    .await
-                    .trace = node.clone();
-            }
-            Some(parent_path) => {
-                let segments = parent_path.split('.').collect::<Vec<&str>>();
-                let mut current_node = self.root_node.clone();
-                for segment in segments {
-                    let next_node = current_node
-                        .read()
-                        .await
-                        .children()
-                        .read()
-                        .await
-                        .get(segment)
-                        .cloned()
-                        .expect(&format!("child node not found, segment: {segment}"));
-                    current_node = next_node;
-                }
-                let read_guard = current_node.read().await;
-                let mut children_w = read_guard.children().write().await;
-                children_w
-                    .get_mut(&field_name)
-                    .expect(&format!("child node not found, field_name: {field_name}"))
-                    .write()
-                    .await
-                    .trace = node.clone();
-            }
-        };
-
         res
     }
 }
