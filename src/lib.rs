@@ -471,7 +471,10 @@ impl Extension for ApolloTracingExtension {
     ) -> ServerResult<Option<Value>> {
         // We do create a node when it's invoked which we insert at the right place inside the
         // struct.
-        let field_name = info.path_node.field_name().to_string();
+        let field_name = match info.path_node.segment {
+            QueryPathSegment::Name(name) => name.to_string(),
+            QueryPathSegment::Index(index) => index.to_string(),
+        };
         let parent_type = info.parent_type.to_string();
         let return_type = info.return_type.to_string();
         let start_time = Utc::now() - *self.start_time.read().await;
