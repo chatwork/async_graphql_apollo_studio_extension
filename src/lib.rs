@@ -58,6 +58,8 @@ use proto::{
 };
 use runtime::{channel, Runtime, RwLock, Sender};
 use std::convert::TryInto;
+use tracing::Span;
+use tracing_futures::Instrument;
 
 /// Apollo Tracing Extension to send traces to Apollo Studio
 /// The extension to include to your `async_graphql` instance to connect with Apollo Studio.
@@ -377,8 +379,8 @@ impl Extension for ApolloTracingExtension {
         // Here every responses are executed
         // The next execute should aggregates a node a not a trace
         let start_time = self.start_time.read().await;
-        let mut end_time = self.end_time.write().await;
-        *end_time = Utc::now();
+        *self.end_time.write().await = Utc::now();
+        let end_time = self.end_time.read().await;
 
         let tracing_extension = ctx
             .data::<ApolloTracingDataExt>()
@@ -462,7 +464,10 @@ impl Extension for ApolloTracingExtension {
         resp
     }
 
-    #[instrument(level = "debug", skip(self, ctx, info, next))]
+    #[instrument(level = "debug", skip(self, ctx, info, next), fields(
+    field_name = info.path_node.field_name(),
+    parent = info.path_node.parent.map(| x | x.to_string_vec().join(".")),
+    ))]
     async fn resolve(
         &self,
         ctx: &ExtensionContext<'_>,
@@ -471,13 +476,15 @@ impl Extension for ApolloTracingExtension {
     ) -> ServerResult<Option<Value>> {
         // We do create a node when it's invoked which we insert at the right place inside the
         // struct.
+        let prepare_span = tracing::debug_span!("finished_preparation");
+        prepare_span.enter();
         let field_name = match info.path_node.segment {
             QueryPathSegment::Name(name) => name.to_string(),
             QueryPathSegment::Index(index) => index.to_string(),
         };
         let parent_type = info.parent_type.to_string();
         let return_type = info.return_type.to_string();
-        let start_time = Utc::now() - *self.start_time.read().await;
+        let start_time = Utc::now() - *self.start_time.read().instrument(tracing::debug_span!("start_time")).await;
         let path_node = info.path_node;
 
         let node: Trace_Node = Trace_Node {
@@ -504,85 +511,103 @@ impl Extension for ApolloTracingExtension {
         };
         let node = Arc::new(RwLock::new(node));
         let parent_node_path = path_node.parent.map(|x| x.to_string_vec().join("."));
+        drop(prepare_span);
         // root node does not have `parent`
-        match &parent_node_path {
-            Some(parent_path) => {
-                let segments = parent_path.split('.').collect::<Vec<&str>>();
-                let mut current_node = self.root_node.clone();
-                for segment in segments {
-                    let next_node = current_node
-                        .read()
-                        .await
-                        .children()
-                        .read()
-                        .await
-                        .get(segment)
-                        .cloned()
-                        .expect(&format!("child node not found, segment: {segment}"));
-                    current_node = next_node;
-                }
+        async {
+            match &parent_node_path {
+                Some(parent_path) => {
+                    let segments = parent_path.split('.').collect::<Vec<&str>>();
+                    let mut current_node = self.root_node.clone();
+                    for segment in segments {
+                        let next_node = current_node
+                            .read()
+                            .await
+                            .children()
+                            .read()
+                            .await
+                            .get(segment)
+                            .cloned()
+                            .expect(&format!("child node not found, segment: {segment}"));
+                        current_node = next_node;
+                    }
 
-                let read_guard = current_node.read().await;
-                let mut children_w = read_guard.children().write().await;
-                children_w.insert(
-                    field_name.clone(),
-                    Arc::new(RwLock::new(TraceTreeNode {
-                        trace: node.clone(),
-                        children: RwLock::new(HashMap::new()),
-                    })),
-                );
-            }
-            None => {
-                self.root_node.read().await.children().write().await.insert(
-                    field_name.clone(),
-                    Arc::new(RwLock::new(TraceTreeNode {
-                        trace: node.clone(),
-                        children: RwLock::new(HashMap::new()),
-                    })),
-                );
+                    let read_guard = current_node.read().await;
+                    let mut children_w = read_guard.children().write().await;
+                    children_w.insert(
+                        field_name.clone(),
+                        Arc::new(RwLock::new(TraceTreeNode {
+                            trace: node.clone(),
+                            children: RwLock::new(HashMap::new()),
+                        })),
+                    );
+                }
+                None => {
+                    self.root_node.read().await.children().write().await.insert(
+                        field_name.clone(),
+                        Arc::new(RwLock::new(TraceTreeNode {
+                            trace: node.clone(),
+                            children: RwLock::new(HashMap::new()),
+                        })),
+                    );
+                }
             }
         }
+        .instrument(tracing::debug_span!("locking_for_insert"))
+        .await;
 
         // Use the path to create a new node
         // https://github.com/apollographql/apollo-server/blob/291c17e255122d4733b23177500188d68fac55ce/packages/apollo-server-core/src/plugin/traceTreeBuilder.ts
-        let res = match next.run(ctx, info).await {
-            Ok(res) => Ok(res),
-            Err(e) => {
-                let mut error = Trace_Error::new();
-                error.set_message(e.message.clone());
-                error.set_location(RepeatedField::from_vec(
-                    e.locations
-                        .clone()
-                        .into_iter()
-                        .map(|x| Trace_Location {
-                            line: x.line as u32,
-                            column: x.column as u32,
-                            ..Default::default()
-                        })
-                        .collect(),
-                ));
-                let json = match serde_json::to_string(&e) {
-                    Ok(content) => content,
-                    Err(e) => serde_json::json!({ "error": format!("{:?}", e) }).to_string(),
-                };
-                error.set_json(json);
-                node.write()
-                    .await
-                    .set_error(RepeatedField::from_vec(vec![error]));
-                Err(e)
+        let res = async {
+            match next.run(ctx, info).await {
+                Ok(res) => Ok(res),
+                Err(e) => {
+                    let mut error = Trace_Error::new();
+                    error.set_message(e.message.clone());
+                    error.set_location(RepeatedField::from_vec(
+                        e.locations
+                            .clone()
+                            .into_iter()
+                            .map(|x| Trace_Location {
+                                line: x.line as u32,
+                                column: x.column as u32,
+                                ..Default::default()
+                            })
+                            .collect(),
+                    ));
+                    let json = match serde_json::to_string(&e) {
+                        Ok(content) => content,
+                        Err(e) => serde_json::json!({ "error": format!("{:?}", e) }).to_string(),
+                    };
+                    error.set_json(json);
+                    async {
+                        node.write()
+                            .await
+                            .set_error(RepeatedField::from_vec(vec![error]));
+                    }
+                    .instrument(tracing::debug_span!("updating_error"))
+                    .await;
+                    Err(e)
+                }
             }
-        };
+        }
+        .instrument(tracing::debug_span!("inner_resolve"))
+        .await;
+
         let end_time = Utc::now() - *self.start_time.read().await;
 
-        node.write().await.set_end_time(
-            match end_time
-                .num_nanoseconds()
-                .and_then(|x| u64::try_from(x).ok())
-            {
-                Some(duration) => duration,
-                None => Utc::now().timestamp_nanos().try_into().unwrap(),
-            },
-        );
+        async {
+            node.write().await.set_end_time(
+                match end_time
+                    .num_nanoseconds()
+                    .and_then(|x| u64::try_from(x).ok())
+                {
+                    Some(duration) => duration,
+                    None => Utc::now().timestamp_nanos().try_into().unwrap(),
+                },
+            );
+        }
+        .instrument(tracing::debug_span!("updating_end_time"))
+        .await;
 
         res
     }
