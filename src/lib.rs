@@ -33,13 +33,13 @@ mod runtime;
 
 #[macro_use]
 extern crate tracing;
+
 use packages::uname::Uname;
 use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_graphql::QueryPathSegment;
 use chrono::{DateTime, Utc};
-use futures::lock::Mutex;
 use protobuf::well_known_types::Timestamp;
 use protobuf::RepeatedField;
 use std::convert::TryFrom;
@@ -213,7 +213,7 @@ impl ApolloTracing {
 
                 count += 1;
 
-                if count > batch_target || count > MAX_TRACES  {
+                if count > batch_target || count > MAX_TRACES {
                     use tracing::{field, field::debug, span, Level};
 
                     let span_batch = span!(
@@ -288,10 +288,7 @@ impl ApolloTracing {
 impl ExtensionFactory for ApolloTracing {
     fn create(&self) -> Arc<dyn Extension> {
         Arc::new(ApolloTracingExtension {
-            inner: Mutex::new(Inner {
-                start_time: Utc::now(),
-                end_time: Utc::now(),
-            }),
+            start_time: Arc::new(RwLock::new(Utc::now())),
             sender: Arc::clone(&self.sender),
             nodes: RwLock::new(HashMap::new()),
             root_node: Arc::new(RwLock::new(Trace_Node::new())),
@@ -300,13 +297,8 @@ impl ExtensionFactory for ApolloTracing {
     }
 }
 
-struct Inner {
-    start_time: DateTime<Utc>,
-    end_time: DateTime<Utc>,
-}
-
 struct ApolloTracingExtension {
-    inner: Mutex<Inner>,
+    start_time: Arc<RwLock<DateTime<Utc>>>,
     sender: Arc<Sender<(String, Trace)>>,
     nodes: RwLock<HashMap<String, Arc<RwLock<Trace_Node>>>>,
     root_node: Arc<RwLock<Trace_Node>>,
@@ -354,13 +346,12 @@ impl Extension for ApolloTracingExtension {
         next: NextExecute<'_>,
     ) -> Response {
         let start_time = Utc::now();
-        self.inner.lock().await.start_time = start_time;
+        *self.start_time.write().await = start_time;
 
         let resp = next.run(ctx, operation_name).await;
         // Here every responses are executed
         // The next execute should aggregates a node a not a trace
-        let mut inner = self.inner.lock().await;
-        inner.end_time = Utc::now();
+        let end_time = Utc::now();
 
         let tracing_extension = ctx
             .data::<ApolloTracingDataExt>()
@@ -393,7 +384,7 @@ impl Extension for ApolloTracingExtension {
         let mut trace = Trace {
             client_name,
             client_version,
-            duration_ns: (inner.end_time - inner.start_time)
+            duration_ns: (end_time - start_time)
                 .num_nanoseconds()
                 .map(|x| x.try_into().unwrap())
                 .unwrap_or(0),
@@ -420,18 +411,14 @@ impl Extension for ApolloTracingExtension {
         });
 
         trace.set_end_time(Timestamp {
-            nanos: inner.end_time.timestamp_subsec_nanos().try_into().unwrap(),
-            seconds: inner.end_time.timestamp(),
+            nanos: end_time.timestamp_subsec_nanos().try_into().unwrap(),
+            seconds: end_time.timestamp(),
             ..Default::default()
         });
 
         trace.set_start_time(Timestamp {
-            nanos: inner
-                .start_time
-                .timestamp_subsec_nanos()
-                .try_into()
-                .unwrap(),
-            seconds: inner.start_time.timestamp(),
+            nanos: start_time.timestamp_subsec_nanos().try_into().unwrap(),
+            seconds: start_time.timestamp(),
             ..Default::default()
         });
 
@@ -463,7 +450,7 @@ impl Extension for ApolloTracingExtension {
         let field_name = info.path_node.field_name().to_string();
         let parent_type = info.parent_type.to_string();
         let return_type = info.return_type.to_string();
-        let start_time = Utc::now() - self.inner.lock().await.start_time;
+        let start_time = Utc::now() - *self.start_time.read().await;
         let path_node = info.path_node;
 
         let node: Trace_Node = Trace_Node {
@@ -481,7 +468,7 @@ impl Extension for ApolloTracingExtension {
                 .and_then(|x| u64::try_from(x).ok())
             {
                 Some(duration) => duration,
-                None => Utc::now().timestamp_nanos().try_into().unwrap(),
+                None => Utc::now().timestamp_nanos_opt().unwrap().try_into().unwrap(),
             },
             parent_type: parent_type.to_string(),
             original_field_name: field_name,
@@ -520,7 +507,7 @@ impl Extension for ApolloTracingExtension {
                 Err(e)
             }
         };
-        let end_time = Utc::now() - self.inner.lock().await.start_time;
+        let end_time = Utc::now() - *self.start_time.read().await;
 
         node.write().await.set_end_time(
             match end_time
@@ -528,7 +515,7 @@ impl Extension for ApolloTracingExtension {
                 .and_then(|x| u64::try_from(x).ok())
             {
                 Some(duration) => duration,
-                None => Utc::now().timestamp_nanos().try_into().unwrap(),
+                None => Utc::now().timestamp_nanos_opt().unwrap().try_into().unwrap(),
             },
         );
 
